@@ -1,184 +1,89 @@
 # IncoPay
 
-**Private payments on Solana — X402-style confidential transactions with gasless UX.**
+Private, session-based x402 payments on Solana. Sign once, settle many — every call confidential, every fee covered.
 
-IncoPay is a next-generation payment primitive that combines **confidential transfers**, **message-based authorization**, and **facilitator-paid gas** to enable seamless, private micropayments on Solana.
+IncoPay turns the x402 "402 Payment Required" protocol into a usable rail for consumer products: pay-per-request APIs, per-token AI inference, per-tick data feeds, in-game microtransactions. A single wallet signature opens a capped, time-bounded session; the facilitator draws down against that session on every billable request. Amounts stay encrypted end-to-end via Inco Lightning. Users never hold SOL; Kora pays the fee.
 
-We extend the x402 model into a privacy-first system:
-- **Sign once → authorize payment**
-- **Sign once → confirm transaction**
-- **Zero gas paid by the user**
-- **Amounts remain confidential**
+## Why this exists
 
----
+Crypto lacks a usable pay-per-call primitive. Three frictions stop it:
 
-## 🌐 What we are building
+1. **Every payment is a wallet prompt.** A user who calls a billable API ten times signs ten times. Fine for a DEX trade, unusable for a normal product surface.
+2. **Amounts are public.** Merchants leak price lists; users leak spending patterns. Token-2022's confidential transfer extension is disabled on mainnet pending audits.
+3. **Gas is a user-side tax.** On Solana every transaction wants SOL in the signer's wallet — a cold-start barrier for every new user.
 
-IncoPay brings **private, programmable payments** to Solana by combining:
+IncoPay composes three existing primitives to fix all three at once.
 
-- Confidential token transfers via Inco Network
-- Message-based payment authorization (X402-style)
-- Gas abstraction using a facilitator (Kora)
+## How it works
 
-This allows users to make payments that are:
-- **Private** (amounts hidden)
-- **Gasless** (no SOL required)
-- **Frictionless** (minimal signatures)
+```
+ ┌───────────┐    sign once     ┌──────────────┐   pay per call   ┌──────────┐
+ │  Wallet   │─────────────────▶│ Facilitator  │─────────────────▶│ Merchant │
+ │ (Phantom/ │  approve + msg   │ cap/expiry   │  402 settled     │   API    │
+ │  Solflare)│                  │ in sqlite    │                  │          │
+ └───────────┘                  └──────┬───────┘                  └──────────┘
+                                       │ signAndSendTransaction
+                                       ▼
+                               ┌──────────────┐      ┌──────────────────┐
+                               │     Kora     │─────▶│  Solana devnet   │
+                               │ (fee payer)  │      │  IncoToken +     │
+                               └──────────────┘      │  Inco Lightning  │
+                                                     └──────────────────┘
+```
 
----
+1. User signs once — one on-chain `approve(cap_ciphertext)` and one Ed25519 intent message. No SOL needed; the facilitator piggy-backs a rent grant into the approve tx.
+2. Merchant API returns 402 with a `PAYMENT-REQUIRED` header pointing at the session scheme.
+3. Client SDK retries with `PAYMENT-SIGNATURE` carrying the sessionId. No wallet prompt.
+4. Facilitator settles via IncoToken's delegated `transfer` — user balance debited, merchant credited, all amounts ciphertext. Kora signs the fee.
+5. Cap is enforced twice: on-chain by Inco Lightning's `e_ge(delegated_amount, amount)`, off-chain by sqlite atomic debit + refund.
 
-## ⚡ Why IncoPay
+## Components
 
-Current crypto payments have major limitations:
+| Repo | What it is |
+|---|---|
+| [IncoPay](https://github.com/IncoPay/IncoPay) | Main workspace: SDK, facilitator, token-deploy CLI, Next.js demo, scaffold, test harness |
+| [IncoPay-KoraFacilator](https://github.com/IncoPay/IncoPay-KoraFacilator) | Kora (Solana Foundation paymaster) configured for the IncoToken + Inco Lightning program allowlist |
+| [IncoPay-docs](https://github.com/IncoPay/IncoPay-docs) | Full developer documentation: quickstart, merchant onboarding, SDK reference, facilitator API, wire format |
+| `.github` | You are here |
 
-- ❌ Amounts are publicly visible  
-- ❌ Users must pay gas for every transaction  
-- ❌ Poor UX for repeated or micro interactions  
+### npm packages
 
-IncoPay solves this by introducing:
-- **Confidential payments by default**
-- **Facilitator-paid gas**
-- **Streamlined authorization flow**
+- `inco-x402-sessions` — client SDK and merchant-side scheme plugin (`createSession`, `wrapFetch`, `SessionIncoScheme`)
+- `create-inco-x402-sessions-facilitator` — `npm create` scaffold that drops a runnable facilitator into a fresh directory
 
----
+## What it unlocks
 
-## 🔑 Key Advantages
+- **Pay-per-inference AI APIs.** Per-message billing at 0.001–0.01 pUSDC with no extra prompts after session open.
+- **Confidential subscriptions.** One approve for a monthly cap; the service meters silently until exhaustion.
+- **Machine-to-machine payments.** Headless agents hold a session, burn it down against APIs, never see a SOL balance.
+- **In-game economies.** Amounts private by default; facilitator-paid fees keep the loop smooth.
+- **Streaming data feeds.** Per-tick settles under the hood while the client just calls `fetch`.
 
-### 1. Private by Default
-- Payment amounts are encrypted (ciphertext)
-- Data remains confidential throughout the flow
-- Only revealed when necessary
+## Key design decisions
 
-### 2. Gasless Experience
-- Users never pay transaction fees
-- Facilitator (via Kora) handles fee payment
-- Ideal for onboarding non-crypto users
+- **Custom x402 scheme `"session"`.** The canonical `exact` scheme wants a wallet prompt per call. `upto` is EVM-only (Permit2-based). We ship a new scheme on top of the v1+v2 wire protocol; any x402-aware client can negotiate it.
+- **Inco Lightning over Token-2022 confidential transfer.** Token-2022's `ZkE1Gama1Proof1...` is currently disabled. Inco's TEE-based covalidator network is live and supports arbitrary confidential compute, not just transfers.
+- **Dual cap enforcement.** On-chain via `delegated_amount` ciphertext (ground truth, expensive to check). Off-chain via sqlite (fast, replay-safe, atomic debit with refund-on-fail). Both running catches the failure modes of either alone.
+- **Zero SOL UX.** The approve transaction includes a `SystemProgram.transfer` from facilitator to user to cover Inco Lightning's allowance-PDA rent (~0.001 SOL). User never acquires SOL; the grant is consumed inside the same tx.
+- **Pluggable Kora.** Kora is the paymaster, not the facilitator. If Kora is down, the facilitator self-signs and submits via direct Solana RPC. Kora's `allowed_programs` config is whitelisted for the IncoToken + Inco Lightning program pair only.
 
-### 3. Minimal Signatures
-- One signature for authorization
-- One signature for transaction
-- No repeated wallet prompts per interaction
+## Trust model
 
-### 4. X402-style Payments
-- Message-based authorization model
-- Compatible with pay-per-use APIs and services
-- Designed for programmable payments
+- **User** trusts the facilitator to respect the session's `cap`, `recipient`, and `expirationUnix`. The cap cannot be overspent (on-chain guard); the recipient and expiry are enforced off-chain by `/verify` cross-checks.
+- **Facilitator** trusts Kora and Solana RPC to submit honestly. A compromised Kora can censor or delay but cannot redirect funds — it does not sign as the transfer authority.
+- **Merchant** trusts `/settle` to either return a real tx signature or refund the sqlite debit. The on-chain signature is independently auditable.
 
-### 5. Modular Architecture
-- Works with existing Solana ecosystem
-- Pluggable facilitator layer
-- Extensible for different use cases
+## Status
 
----
+- Solana **devnet**: live. IncoToken program `9Cir3JKBcQ1mzasrQNKWMiGVZvYu3dxvfkGeQ6mohWWi` and Inco Lightning program `5sjEbPiqgZrYwR31ahR6Uk9wf5awoX61YGg7jExQSwaj` are both executable and integrated. Full end-to-end flow verified: token deployment, encrypted airdrop, `createSession`, five consecutive settles, cap enforcement, cross-restart session persistence, multi-user concurrent sessions.
+- Solana **mainnet**: awaiting Inco Lightning mainnet deployment and a completed external audit of the facilitator. Production checklist published in docs.
 
-## 🧠 What this enables
+## Get started
 
-IncoPay unlocks new categories of applications:
+- [Documentation →](https://github.com/IncoPay/IncoPay-docs) — quickstart, architecture, merchant onboarding, SDK + API reference
+- [Main workspace →](https://github.com/IncoPay/IncoPay) — all packages
+- [Kora fork →](https://github.com/IncoPay/IncoPay-KoraFacilator) — paymaster configured for IncoPay
 
-### 🤖 AI & Agents
-- Private pay-per-inference APIs
-- Autonomous agents making confidential payments
-- Usage-based AI billing without exposing data
+## License
 
-### 🎮 Games
-- Hidden in-game economies
-- Private microtransactions
-- Seamless player experience without gas friction
-
-### 🌐 APIs & SaaS
-- Pay-per-request APIs with confidential pricing
-- Monetization without exposing usage patterns
-- Better UX for developers and users
-
-### 💬 Real-time Apps
-- Chat systems with private per-message payments
-- Streaming payments with hidden amounts
-- Interactive apps with continuous settlement
-
----
-
-## 🏗️ Core Architecture
-
-IncoPay is built around three main components:
-
-### 🧩 User
-- Signs a payment authorization message
-- Signs the transaction once
-- Never pays gas
-
-### ⚙️ Facilitator
-- Verifies user authorization
-- Constructs transaction payloads
-- Forwards signed transactions
-
-### ⛽ Fee Payer (Kora)
-- Adds fee-payer signature
-- Submits transaction to Solana
-- Ensures gasless UX
-
-### 🔒 Inco Network
-- Handles confidential token transfers
-- Keeps amounts encrypted via ciphertext
-- Powers privacy layer
-
----
-
-## 🔐 Trust Model
-
-IncoPay separates concerns clearly:
-
-- **On-chain**
-  - Signature verification (Ed25519)
-  - Transaction execution
-  - Confidential transfer logic
-
-- **Off-chain (Facilitator + Kora)**
-  - Transaction orchestration
-  - Fee payment
-  - Request lifecycle management
-
-This ensures:
-- Privacy of transaction data
-- Smooth user experience
-- Reliable execution flow
-
----
-
-## 🚀 Vision
-
-IncoPay is building toward a future where:
-
-- Payments are **invisible but verifiable**
-- Privacy is **default, not optional**
-- Users interact without worrying about gas or friction
-
-We believe the next evolution of payments is:
-> **Private, programmable, and user-invisible**
-
----
-
-## 📦 Ecosystem
-
-The IncoPay ecosystem includes:
-
-- **Frontend apps** — real-world payment flows
-- **Facilitator service** — payment lifecycle management
-- **On-chain programs** — confidential transfer logic
-- **Integrations** — Inco Network and Kora
-
----
-
-## 🧩 Built for builders
-
-IncoPay is designed for:
-
-- Developers building on Solana
-- Teams exploring confidential finance
-- Founders creating AI, gaming, and API products
-- Anyone who wants **better UX + privacy in payments**
-
----
-
-## 📜 License
-
-MIT
+MIT, across all repositories.
