@@ -2,6 +2,9 @@
 
 Private, session-based x402 payments on Solana. Sign once, settle many — every call confidential, every fee covered.
 
+> **SDK on npm:** [`solana-x402-sessions`](https://www.npmjs.com/package/solana-x402-sessions) (v1.0.0)
+> **Hosted facilitator (devnet):** [`inco-facilitator-production.up.railway.app`](https://inco-facilitator-production.up.railway.app)
+
 IncoPay turns the x402 "402 Payment Required" protocol into a usable rail for consumer products: pay-per-request APIs, per-token AI inference, per-tick data feeds, in-game microtransactions. A single wallet signature opens a capped, time-bounded session; the facilitator draws down against that session on every billable request. Amounts stay encrypted end-to-end via Inco Lightning. Users never hold SOL; Kora pays the fee.
 
 ## Why this exists
@@ -48,8 +51,8 @@ IncoPay composes three existing primitives to fix all three at once.
 
 ### npm packages
 
-- `inco-x402-sessions` — client SDK and merchant-side scheme plugin (`createSession`, `wrapFetch`, `SessionIncoScheme`)
-- `create-inco-x402-sessions-facilitator` — `npm create` scaffold that drops a runnable facilitator into a fresh directory
+- [`solana-x402-sessions`](https://www.npmjs.com/package/solana-x402-sessions) — client SDK and merchant-side scheme plugin (`createSession`, `wrapFetch`, `SessionIncoScheme`)
+- `create-inco-x402-facilitator` — `npm create` scaffold that drops a runnable facilitator into a fresh directory
 
 ## What it unlocks
 
@@ -61,7 +64,7 @@ IncoPay composes three existing primitives to fix all three at once.
 
 ## Key design decisions
 
-- **Custom x402 scheme `"session"`.** The canonical `exact` scheme wants a wallet prompt per call. `upto` is EVM-only (Permit2-based). We ship a new scheme on top of the v1+v2 wire protocol; any x402-aware client can negotiate it.
+- **Custom x402 scheme `"session"`.** The canonical `exact` scheme wants a wallet prompt per call, which is unworkable for AI streaming or per-tick metering. We ship a new scheme on top of the v1+v2 wire protocol that maps cleanly to IncoToken's `approve` + delegated `transfer` on Solana; any x402-aware client can negotiate it.
 - **Inco Lightning over Token-2022 confidential transfer.** Token-2022's `ZkE1Gama1Proof1...` is currently disabled. Inco's TEE-based covalidator network is live and supports arbitrary confidential compute, not just transfers.
 - **Dual cap enforcement.** On-chain via `delegated_amount` ciphertext (ground truth, expensive to check). Off-chain via sqlite (fast, replay-safe, atomic debit with refund-on-fail). Both running catches the failure modes of either alone.
 - **Zero SOL UX.** The approve transaction includes a `SystemProgram.transfer` from facilitator to user to cover Inco Lightning's allowance-PDA rent (~0.001 SOL). User never acquires SOL; the grant is consumed inside the same tx.
